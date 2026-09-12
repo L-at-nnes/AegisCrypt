@@ -26,11 +26,17 @@ pub struct AegisApp {
     progress: f32,
     rx: Option<Receiver<WorkerEvent>>,
     installed: bool,
+    // Which field should grab keyboard focus on the next frame. Set these
+    // instead of calling request_focus() directly, since the field in
+    // question might not even be rendered yet this frame.
+    want_focus_password: bool,
+    want_focus_confirm: bool,
 }
 
 impl AegisApp {
     pub fn new(target: Option<PathBuf>) -> Self {
         let is_decrypt = target.as_deref().map(worker::is_vault).unwrap_or(false);
+        let has_target = target.is_some();
         Self {
             target,
             is_decrypt,
@@ -41,6 +47,8 @@ impl AegisApp {
             progress: 0.0,
             rx: None,
             installed: registry::is_installed(),
+            want_focus_password: has_target,
+            want_focus_confirm: false,
         }
     }
 
@@ -59,6 +67,8 @@ impl AegisApp {
         self.password.clear();
         self.confirm.clear();
         self.status = Status::Idle;
+        self.want_focus_password = true;
+        self.want_focus_confirm = false;
     }
 
     fn start_job(&mut self) {
@@ -132,6 +142,13 @@ impl eframe::App for AegisApp {
                 }
             }
         });
+
+        // Pressing Enter once a task is done closes the app - handy for the
+        // drag-and-drop / right-click flow, where there's nothing left to do
+        // after the success message anyway.
+        if matches!(self.status, Status::Done { .. }) && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(12.0);
@@ -223,15 +240,33 @@ impl AegisApp {
         ui.label(egui::RichText::new(target.display().to_string()).monospace().weak());
         ui.add_space(12.0);
 
+        if !self.needs_confirm_field() {
+            // The confirm field isn't showing this frame, so a pending
+            // request to focus it would otherwise just be dropped forever.
+            self.want_focus_confirm = false;
+        }
+
+        let mut password_submitted = false;
         ui.horizontal(|ui| {
             ui.label("Password:");
-            ui.add(egui::TextEdit::singleline(&mut self.password).password(!self.show_password).desired_width(240.0));
+            let field = ui.add(egui::TextEdit::singleline(&mut self.password).password(!self.show_password).desired_width(240.0));
+            if self.want_focus_password {
+                field.request_focus();
+                self.want_focus_password = false;
+            }
+            password_submitted = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         });
 
+        let mut confirm_submitted = false;
         if self.needs_confirm_field() {
             ui.horizontal(|ui| {
                 ui.label("Confirm:  ");
-                ui.add(egui::TextEdit::singleline(&mut self.confirm).password(true).desired_width(240.0));
+                let field = ui.add(egui::TextEdit::singleline(&mut self.confirm).password(true).desired_width(240.0));
+                if self.want_focus_confirm {
+                    field.request_focus();
+                    self.want_focus_confirm = false;
+                }
+                confirm_submitted = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             });
         }
 
@@ -264,6 +299,18 @@ impl AegisApp {
                 ui.label(egui::RichText::new(msg).weak().size(12.0));
             }
         }
+
+        // Enter in the password field either jumps to "Confirm" (when there
+        // is one) or submits directly; Enter in "Confirm" always submits.
+        if password_submitted {
+            if self.needs_confirm_field() {
+                self.want_focus_confirm = true;
+            } else if self.passwords_valid().is_ok() {
+                self.start_job();
+            }
+        } else if confirm_submitted && self.passwords_valid().is_ok() {
+            self.start_job();
+        }
     }
 
     fn render_working(&mut self, ui: &mut egui::Ui) {
@@ -279,8 +326,11 @@ impl AegisApp {
         ui.add_space(4.0);
         ui.label(egui::RichText::new(path.display().to_string()).monospace());
         ui.add_space(12.0);
-        if ui.button("Done").clicked() {
-            self.reset_to_home();
-        }
+        ui.horizontal(|ui| {
+            if ui.button("Done").clicked() {
+                self.reset_to_home();
+            }
+            ui.label(egui::RichText::new("or press Enter to close this window").weak().size(12.0));
+        });
     }
 }

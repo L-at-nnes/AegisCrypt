@@ -36,6 +36,16 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "AegisCrypt",
         options,
-        Box::new(|_cc| Ok(Box::new(app::AegisApp::new(target)))),
+        Box::new(|cc| {
+            // Programmatic auto-focus (jumping from the password field to
+            // "Confirm", etc.) shouldn't come with egui's usual bright focus
+            // ring - a plain blinking caret is enough. Tone the selection
+            // stroke down to the same subtle color as an ordinary border.
+            cc.egui_ctx.style_mut(|style| {
+                let subtle = style.visuals.widgets.inactive.bg_stroke.color;
+                style.visuals.selection.stroke.color = subtle;
+            });
+            Ok(Box::new(app::AegisApp::new(target)))
+        }),
     )
 }
